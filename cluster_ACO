@@ -1,0 +1,311 @@
+def run_aco_per_cluster(data, cluster_column, graph, aco_params):
+    clusters = data[cluster_column].unique()
+    results_per_cluster = {}
+
+    for cluster in clusters:
+        # Filter nodes for the current cluster
+        cluster_nodes = data[data[cluster_column] == cluster]['n1'].tolist()
+
+        # Create a subgraph for the current cluster
+        cluster_subgraph = graph.subgraph(cluster_nodes).copy()
+
+        # Run ACO on the subgraph
+        result = run_aco(
+            graph=cluster_subgraph,
+            target_df= tt[tt['edge_stat'] == 'target'],
+            **aco_params
+        )
+
+        # Store the result
+        results_per_cluster[cluster] = result
+
+        print(f"Cluster {cluster}: Best Path = {result['global_best_path']}, Cost = {result['global_best_cost']}")
+
+    return results_per_cluster
+
+
+aco_params = {
+    "extra_pheromone" : 6.0,
+    "n_ants" : 200,
+    "alpha" : 2.0,
+    "beta" : 6.0,
+    "evaporation_rate": 0.2,
+    "init_pheromone": 0.9,
+    "iterations": 10,
+    "unvisited_only": True,
+    "max_visits": 15,
+    "min_visit_percentage" : 1.5,
+    "top_percent" : 0.3,
+    "virtual_pheromone_weight" : 0.1
+}
+
+results = run_aco_per_cluster(data=tilbury_df, cluster_column='cluster_label',graph=G, aco_params=aco_params)
+
+
+
+
+def construct_full_path(final_path, path_details_df):
+    """
+    Constructs the full path list based on the final path list and path details DataFrame.
+
+    Parameters:
+    - final_path (list): The list of nodes representing the main path sequence (e.g., ["A", "D", "F"]).
+    - path_details_df (pd.DataFrame): DataFrame containing `from_node`, `to_node`, and `path`.
+      Each row represents a subpath with nodes connecting `from_node` to `to_node`.
+
+    Returns:
+    - list: Full path list combining all subpaths from path_details_df.
+
+    Raises:
+    - ValueError: If a subpath for a pair of nodes is not found in path_details_df.
+    """
+    full_path = []
+
+    # Loop through consecutive nodes in the final_path
+    for i in range(len(final_path) - 1):
+        current_node = final_path[i]
+        next_node = final_path[i + 1]
+        
+        # Find the subpath in the DataFrame
+        subpath_row = path_details_df[
+            (path_details_df["from_node"] == current_node) &
+            (path_details_df["to_node"] == next_node)
+        ]
+        
+        if not subpath_row.empty:
+            subpath = subpath_row.iloc[0]["path"]
+            # Add the subpath to the full path, avoiding duplicate nodes
+            if full_path:
+                full_path.extend(subpath[1:])  # Skip the first node of the subpath
+            else:
+                full_path.extend(subpath)  # Add the entire first subpath
+        else:
+            raise ValueError(f"No subpath found for {current_node} -> {next_node}")
+
+    return full_path
+
+def create_ordered_dataframe(full_path, original_df):
+    """
+    Creates a new DataFrame with rows from `original_df` ordered according to the sequence in `full_path`.
+
+    Parameters:
+    - full_path (list): List of nodes defining the order (e.g., ["A", "D", "F"]).
+    - original_df (pd.DataFrame): Original DataFrame with columns `from_node`, `to_node`, `weight`, and `source`.
+
+    Returns:
+    - pd.DataFrame: New DataFrame with rows ordered according to `full_path`.
+    """
+    # Create an empty list to store matching rows
+    ordered_rows = []
+
+    # Iterate through consecutive pairs in full_path
+    for i in range(len(full_path) - 1):
+        current_node = full_path[i]
+        next_node = full_path[i + 1]
+        
+        # Find the corresponding row in the original DataFrame
+        row = original_df[
+            (original_df["n1"] == current_node) &
+            (original_df["n2"] == next_node)
+        ]
+        
+        if not row.empty:
+            ordered_rows.append(row.iloc[0])  # Append the first matching row
+        else:
+            raise ValueError(f"No row found for {current_node} -> {next_node}")
+
+    # Create a new DataFrame from the ordered rows
+    new_df = pd.DataFrame(ordered_rows)
+    return new_df
+
+
+def process_results_with_given_data(results, path_details_df, original_df):
+
+    final_results = {}
+    metrics = []
+
+    for cluster_label, cluster_data in results.items():
+        global_best_path = cluster_data['global_best_path']
+        print(f"Processing Cluster")
+
+        try:
+            full_path = construct_full_path(global_best_path, path_details_df)
+            print(f"Full Path for Cluster {cluster_label}")
+            ordered_df = create_ordered_dataframe(full_path, original_df)
+            print(f"Ordered DataFrame for Cluster {cluster_label}")
+
+            final_results[cluster_label] = ordered_df
+            
+            total_distance_covered = ordered_df["weight"].astype(float).sum()
+            total_normal_distance = ordered_df[ordered_df['edge_stat'] == 'normal']["weight"].astype(float).sum()
+            total_target_distance = ordered_df[ordered_df['edge_stat'] == 'target']["weight"].astype(float).sum()
+            total_distinct_target_distance = (
+                ordered_df[ordered_df['edge_stat'] == 'target']
+                .drop_duplicates(subset=["n1", "n2"])["weight"]
+                .astype(float)
+                .sum()
+            )
+
+            total_roads_covered = ordered_df.shape[0]
+            total_normal_roads = ordered_df[ordered_df['edge_stat'] == 'normal'].shape[0]
+            total_target_roads = ordered_df[ordered_df['edge_stat'] == 'target'].shape[0]
+            total_distinct_target_road = (
+                ordered_df[ordered_df['edge_stat'] == 'target']
+                .drop_duplicates(subset=["n1", "n2"])
+                .shape[0]
+            )
+
+            efficiency = total_distinct_target_distance / total_distance_covered
+            coverage = total_distinct_target_road / len(modified)
+
+            # Append metrics for the current cluster
+            metrics.append({
+                "cluster": cluster_label,
+                "efficiency": efficiency,
+                "coverage": coverage,
+                "total_distance_covered": total_distance_covered,
+                "total_normal_distance": total_normal_distance,
+                "total_target_distance": total_target_distance,
+                "total_distinct_target_distance": total_distinct_target_distance,
+                "total_roads_covered": total_roads_covered,
+                "total_normal_roads": total_normal_roads,
+                "total_target_roads": total_target_roads,
+                "total_distinct_target_road": total_distinct_target_road
+                
+            })
+
+
+    
+
+        except ValueError as e:
+            print(f"Error processing Cluster {cluster_label}: {e}")
+            final_results[cluster_label] = None
+
+    metrics_df = pd.DataFrame(metrics)
+    return final_results, metrics_df
+
+
+
+final_results, metrics_df = process_results_with_given_data(results, path_details_df, tilbury_df)
+
+metrics_df
+
+
+
+def build_graph(final_results):
+    """
+    Build a weighted graph from the final_results dictionary.
+
+    Parameters:
+    - final_results (dict): Dictionary where each key is a cluster label, 
+                            and values are DataFrames containing `n1`, `n2`, and `weight`.
+
+    Returns:
+    - G (networkx.DiGraph): A directed weighted graph representing the paths.
+    - cluster_endpoints (dict): Dictionary storing the (start, end) nodes of each cluster.
+    """
+    G = nx.DiGraph()
+    cluster_endpoints = {}
+
+    for cluster_label, df in final_results.items():
+        if df is None or df.empty:
+            continue
+
+        # Add edges to the graph
+        for _, row in df.iterrows():
+            G.add_edge(row["n1"], row["n2"], weight=row["weight"])
+
+        # Store start and end nodes for each cluster
+        start_node = df.iloc[0]["n1"]
+        end_node = df.iloc[-1]["n2"]
+        cluster_endpoints[cluster_label] = (start_node, end_node)
+
+    return G, cluster_endpoints
+
+def find_shortest_intercluster_paths(G, cluster_endpoints):
+    """
+    Find the shortest paths between cluster endpoints.
+
+    Parameters:
+    - G (networkx.DiGraph): Graph representation of paths.
+    - cluster_endpoints (dict): Dictionary storing start and end nodes of each cluster.
+
+    Returns:
+    - intercluster_paths (dict): Dictionary with shortest paths between cluster endpoints.
+    """
+    intercluster_paths = {}
+    cluster_labels = list(cluster_endpoints.keys())
+
+    for i in range(len(cluster_labels) - 1):
+        current_cluster = cluster_labels[i]
+        next_cluster = cluster_labels[i + 1]
+
+        start = cluster_endpoints[current_cluster][1]  # End of current cluster
+        end = cluster_endpoints[next_cluster][0]  # Start of next cluster
+
+        try:
+            # Find the shortest path
+            path = nx.shortest_path(G, source=start, target=end, weight="weight", method="dijkstra")
+            intercluster_paths[(current_cluster, next_cluster)] = path
+        except nx.NetworkXNoPath:
+            print(f"Warning: No direct path found between {start} and {end}. Trying alternative connections.")
+            # If no direct path exists, use all-pairs shortest path approach
+            possible_paths = nx.single_source_dijkstra_path(G, source=start, weight="weight")
+            if end in possible_paths:
+                intercluster_paths[(current_cluster, next_cluster)] = possible_paths[end]
+            else:
+                print(f"Error: No valid alternative path found between {start} and {end}.")
+
+    return intercluster_paths
+
+def stitch_complete_path(final_results):
+    """
+    Stitch all cluster paths together to form a complete path with the shortest distance.
+
+    Parameters:
+    - final_results (dict): Dictionary where each key is a cluster label, and values are DataFrames.
+
+    Returns:
+    - final_path (list): The fully connected path.
+    - total_distance (float): Total distance of the final stitched path.
+    """
+    G, cluster_endpoints = build_graph(final_results)
+    intercluster_paths = find_shortest_intercluster_paths(G, cluster_endpoints)
+
+    final_path = []
+    total_distance = 0.0
+
+    for cluster_label, df in final_results.items():
+        if df is None or df.empty:
+            continue
+
+        # Add the cluster's path
+        if not final_path:
+            final_path.extend(df["n1"].tolist())  # First cluster keeps full path
+        else:
+            final_path.extend(df["n1"].tolist()[1:])  # Skip first node to avoid duplication
+
+        # Add the shortest path to the next cluster
+        next_cluster = cluster_label + 1
+        if (cluster_label, next_cluster) in intercluster_paths:
+            inter_path = intercluster_paths[(cluster_label, next_cluster)]
+            final_path.extend(inter_path[1:])  # Avoid duplication
+
+    # Compute total distance
+    for i in range(len(final_path) - 1):
+        if G.has_edge(final_path[i], final_path[i + 1]):
+            total_distance += G[final_path[i]][final_path[i + 1]]["weight"]
+
+    return final_path, total_distance
+
+
+final_path, total_distance = stitch_complete_path(final_results)
+
+# Print Results
+print("Final Complete Path:", final_path)
+print("Total Distance:", total_distance)
+
+
+
+
+
